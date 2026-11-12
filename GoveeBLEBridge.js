@@ -1,4 +1,4 @@
-import { udp } from "@SignalRGB/udp";
+import udp from "@SignalRGB/udp";
 
 /* global controller, service, discovery, LightingMode, forcedColor */
 
