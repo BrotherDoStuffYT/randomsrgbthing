@@ -86,13 +86,9 @@ function GetRGBFrame() {
         return undefined;
     }
     const raw = channel.getColors("Inline");
-
-    device.log(
-        "Component data: " +
-        (Array.isArray(raw)
-            ? "array, length=" + raw.length + ", sample=" + JSON.stringify(raw.slice(0, 6))
-            : "type=" + typeof raw + ", value=" + String(raw))
-    );
+    device.log("Component constructor: " + raw.constructor.name);
+    device.log("Component keys: " + Object.keys(raw).join(", "));
+    device.log("Component JSON: " + JSON.stringify(raw));
     
     return NormalizeColorArray(raw, ledCount);
 }
