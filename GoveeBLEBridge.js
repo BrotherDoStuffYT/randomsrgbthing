@@ -1,4 +1,4 @@
-import udp from "@SignalRGB/udp";
+import { udp } from "@SignalRGB/udp";
 
 /* global controller, service, discovery, LightingMode, forcedColor */
 
@@ -44,7 +44,7 @@ export function ControllableParameters() {
 }
 
 function LedCountForController() {
-    const key = controller?.deviceKey;
+    const key = (typeof controller !== "undefined" && controller) ? controller.deviceKey : undefined;
     const definition = DEVICE_DEFINITIONS.find((item) => item.deviceKey === key);
     return definition ? definition.ledCount : 14;
 }
@@ -159,7 +159,7 @@ class BridgeController {
     constructor(value) {
         this.id = value.id;
         const cached = discovery.cache.Get(value.id);
-        this.paired = value.paired ?? cached?.paired ?? false;
+        this.paired = (value.paired !== undefined && value.paired !== null) ? value.paired : ((cached && cached.paired !== undefined) ? cached.paired : false);
         this.deviceKey = value.deviceKey;
         this.name = value.name;
         this.sku = value.sku;
@@ -171,7 +171,7 @@ class BridgeController {
     }
 
     updateWithValue(value) {
-        this.paired = value.paired ?? this.paired;
+        this.paired = (value.paired !== undefined && value.paired !== null) ? value.paired : this.paired;
         this.deviceKey = value.deviceKey;
         this.name = value.name;
         this.sku = value.sku;
@@ -228,7 +228,9 @@ export function DiscoveryService() {
     this.LoadCachedDevices = function () {
         for (const definition of DEVICE_DEFINITIONS) {
             const cached = this.cache.Get(definition.id);
-            this.CreateControllerDevice({ ...definition, paired: cached?.paired ?? false });
+            var deviceValue = Object.assign({}, definition);
+            deviceValue.paired = (cached && cached.paired !== undefined && cached.paired !== null) ? cached.paired : false;
+            this.CreateControllerDevice(deviceValue);
         }
     };
     this.CreateControllerDevice = function (value) {
