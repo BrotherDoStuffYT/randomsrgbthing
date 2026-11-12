@@ -143,7 +143,7 @@ export function Render() {
 
     if (lastLoggedDevice !== controller.deviceKey) {
         lastLoggedDevice = controller.deviceKey;
-        device.log(`Sending RGB frames for ${controller.deviceKey}.`);
+        device.log(`First RGB datagram sent for ${controller.deviceKey} (${colors.length / 3} segments).`);
     }
 }
 
