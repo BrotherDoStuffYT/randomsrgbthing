@@ -73,14 +73,16 @@ function NormalizeColorArray(raw, expectedLedCount) {
 }
 
 function GetRGBFrame() {
-    const ledCount = LedCountForController();
+    const channel = device.channel(CHANNEL_NAME);
+    const ledCount = channel ? channel.LedCount() : 0;
+    
+    if (LightingMode === "Forced") {
     if (LightingMode === "Forced") {
         return device.createColorArray(forcedColor, ledCount, "Inline");
     }
 
     // Component mode: SignalRGB maps the user's selected fan/strip components
     // onto this channel. getColors() returns the resulting RGB values in chain order.
-    const channel = device.channel(CHANNEL_NAME);
     if (!channel || typeof channel.getColors !== "function") {
         device.log("Component channel is unavailable; no RGB frame can be sent yet.");
         return undefined;
@@ -128,7 +130,8 @@ export function Render() {
     lastFrameAt = now;
 
     const colors = GetRGBFrame();
-    const expectedValues = LedCountForController() * 3;
+    const channel = device.channel(CHANNEL_NAME);
+    const expectedValues = channel ? channel.LedCount() * 3 : 0;
     if (!Array.isArray(colors) || colors.length !== expectedValues) {
         device.log(`No valid component RGB frame for ${controller.deviceKey}; expected ${expectedValues} values.`);
         return;
