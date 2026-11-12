@@ -40,8 +40,9 @@ let lastRenderDiagnosticAt = 0;
 let loggedColorShapeWarning = false;
 
 export function Name() { return "Govee BLE Bridge"; }
-export function Version() { return "0.1.0"; }
+export function Version() { return "0.2.0"; }
 export function Type() { return "network"; }
+export function DeviceType() { return "lightingcontroller"; }
 export function Publisher() { return "Stuffy"; }
 // LED geometry is defined in the same order as the Govee segment indices.
 // H60A1: segments 1-13 form the outer ring; segment 14 is the center panel.
@@ -115,6 +116,12 @@ function ParseForcedColor(value) {
     return [0, 155, 222];
 }
 
+function ConfigureChannels() {
+    const ledCount = Number(controller.ledCount) || 14;
+    device.SetLedLimit(ledCount);
+    device.addChannel(CHANNEL_NAME, ledCount);
+}
+
 function GetChannelRGB() {
     const ledCount = Number(controller.ledCount) || 14;
     if (LightingMode === "Forced") {
@@ -122,18 +129,24 @@ function GetChannelRGB() {
         return Array.from({ length: ledCount }, () => color).flat();
     }
 
-    // SignalRGB's device.color(x, y) reads the rendered canvas pixel at
-    // the LED's mapped position. The channel.getColors() API is for
-    // configured component channels and can return no data when none are set.
-    const colors = [];
-    const positions = GetLedPositions();
-    if (positions.length !== ledCount) return undefined;
-    for (const [x, y] of positions) {
-        const color = device.color(x, y);
-        if (!Array.isArray(color) || color.length < 3) return undefined;
-        colors.push(Number(color[0]) || 0, Number(color[1]) || 0, Number(color[2]) || 0);
+    const channel = device.channel(CHANNEL_NAME);
+    let channelColors;
+    if (channel.LedCount() === 0) {
+        const pulseColor = device.getChannelPulseColor(CHANNEL_NAME, ledCount);
+        channelColors = device.createColorArray(pulseColor, ledCount, "Seperate");
+    } else {
+        channelColors = channel.getColors("Seperate");
     }
-    return colors;
+
+    if (!Array.isArray(channelColors) || channelColors.length < 3) return undefined;
+    const [red, green, blue] = channelColors;
+    if (![red, green, blue].every((values) => Array.isArray(values) && values.length >= ledCount)) return undefined;
+
+    const interleaved = [];
+    for (let i = 0; i < ledCount; i++) {
+        interleaved.push(Number(red[i]) || 0, Number(green[i]) || 0, Number(blue[i]) || 0);
+    }
+    return interleaved;
 }
 
 export function Initialize() {
@@ -145,6 +158,7 @@ export function Initialize() {
 
     device.setName(`Govee BLE - ${controller.name || controller.sku}`);
     device.setImageFromUrl(DEVICE_IMAGE);
+    ConfigureChannels();
     if (socket !== undefined) {
         try { socket.close(); } catch (_) { /* Ignore stale socket during reinit. */ }
     }
