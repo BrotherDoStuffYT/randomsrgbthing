@@ -36,6 +36,8 @@ let socket;
 let socketConnected = false;
 let lastFrameAt = 0;
 let lastLoggedDevice = "";
+let lastRenderDiagnosticAt = 0;
+let loggedColorShapeWarning = false;
 
 export function Name() { return "Govee BLE Bridge"; }
 export function Version() { return "0.1.0"; }
@@ -96,6 +98,8 @@ export function Initialize() {
     socketConnected = false;
     lastFrameAt = 0;
     lastLoggedDevice = "";
+    lastRenderDiagnosticAt = 0;
+    loggedColorShapeWarning = false;
 
     device.setName(`Govee BLE - ${controller.name || controller.sku}`);
     device.setImageFromUrl(DEVICE_IMAGE);
@@ -108,7 +112,7 @@ export function Initialize() {
     socket = udp.createSocket();
     socket.on("connected", () => {
         socketConnected = true;
-        device.log(`Connected to local Govee BLE bridge at ${BRIDGE_HOST}:${BRIDGE_PORT}.`);
+        device.log(`UDP socket connected to ${BRIDGE_HOST}:${BRIDGE_PORT}.`);
     });
     socket.on("disconnected", () => {
         socketConnected = false;
@@ -124,14 +128,25 @@ export function Initialize() {
 }
 
 export function Render() {
-    if (socket === undefined || !socketConnected) return;
+    // UDP connect() sets the destination; it is not a TCP-style session.
+    // SignalRGB's UDP documentation sends directly from Render().
+    if (socket === undefined) return;
 
     const now = Date.now();
+    if (now - lastRenderDiagnosticAt >= 5000) {
+        lastRenderDiagnosticAt = now;
+        device.log(`Render is running for ${controller.deviceKey}; preparing ${controller.ledCount} segments.`);
+    }
     if (now - lastFrameAt < FRAME_INTERVAL_MS) return;
     lastFrameAt = now;
 
     const colors = GetChannelRGB();
     if (!Array.isArray(colors) || colors.length !== Number(controller.ledCount) * 3) {
+        if (!loggedColorShapeWarning) {
+            loggedColorShapeWarning = true;
+            const actualLength = Array.isArray(colors) ? colors.length : "not an array";
+            device.log(`RGB data shape mismatch for ${controller.deviceKey}: expected ${Number(controller.ledCount) * 3} values, got ${actualLength}.`);
+        }
         return;
     }
 
@@ -139,11 +154,14 @@ export function Render() {
         device: controller.deviceKey,
         colors: colors,
     });
-    socket.send(payload);
-
-    if (lastLoggedDevice !== controller.deviceKey) {
-        lastLoggedDevice = controller.deviceKey;
-        device.log(`First RGB datagram sent for ${controller.deviceKey} (${colors.length / 3} segments).`);
+    try {
+        socket.send(payload);
+        if (lastLoggedDevice !== controller.deviceKey) {
+            lastLoggedDevice = controller.deviceKey;
+            device.log(`First RGB datagram queued for ${controller.deviceKey} (${colors.length / 3} segments).`);
+        }
+    } catch (err) {
+        device.log(`UDP send failed for ${controller.deviceKey}: ${err}`);
     }
 }
 
