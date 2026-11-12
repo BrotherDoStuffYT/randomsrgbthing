@@ -161,7 +161,14 @@ export function Shutdown() {
 class BridgeController {
     constructor(value) {
         this.id = value.id;
-        this.paired = value.paired ?? discovery.cache.Get(value.id)?.paired ?? false;
+        var cached = discovery.cache.Get(value.id);
+        if (value.paired !== undefined && value.paired !== null) {
+            this.paired = value.paired;
+        } else if (cached && cached.paired !== undefined && cached.paired !== null) {
+            this.paired = cached.paired;
+        } else {
+            this.paired = false;
+        }
         this.deviceKey = value.deviceKey;
         this.name = value.name;
         this.sku = value.sku;
@@ -173,7 +180,9 @@ class BridgeController {
     }
 
     updateWithValue(value) {
-        this.paired = value.paired ?? this.paired;
+        if (value.paired !== undefined && value.paired !== null) {
+            this.paired = value.paired;
+        }
         this.deviceKey = value.deviceKey;
         this.name = value.name;
         this.sku = value.sku;
@@ -258,7 +267,16 @@ export function DiscoveryService() {
         // Recreate the three known virtual devices, preserving each one's link state.
         for (const definition of DEVICE_DEFINITIONS) {
             const cached = this.cache.Get(definition.id);
-            this.CreateControllerDevice({ ...definition, paired: cached?.paired ?? false });
+            var deviceValue = {};
+            for (var key in definition) {
+                if (Object.prototype.hasOwnProperty.call(definition, key)) {
+                    deviceValue[key] = definition[key];
+                }
+            }
+            deviceValue.paired = cached && cached.paired !== undefined && cached.paired !== null
+                ? cached.paired
+                : false;
+            this.CreateControllerDevice(deviceValue);
         }
     };
 
