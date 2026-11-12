@@ -43,7 +43,14 @@ export function Name() { return "Govee BLE Bridge"; }
 export function Version() { return "0.1.0"; }
 export function Type() { return "network"; }
 export function Publisher() { return "Stuffy"; }
-export function Size() { return [14, 1]; }
+export function Size() {
+    const count = Number(controller?.ledCount) || 14;
+    return [count, 1];
+}
+export function LedPositions() {
+    const count = Number(controller?.ledCount) || 14;
+    return Array.from({ length: count }, (_, index) => [index, 0]);
+}
 export function SubdeviceController() { return true; }
 export function ImageUrl() { return DEVICE_IMAGE; }
 
@@ -68,30 +75,38 @@ export function ControllableParameters() {
     ];
 }
 
-function ConfigureChannels() {
-    const ledCount = Number(controller.ledCount) || 14;
-    device.addChannel(CHANNEL_NAME, ledCount);
-    device.channel(CHANNEL_NAME).SetLedLimit(ledCount);
-    device.SetLedLimit(ledCount);
+function ParseForcedColor(value) {
+    if (Array.isArray(value) && value.length >= 3) {
+        return value.slice(0, 3).map((part) => Math.max(0, Math.min(255, Number(part) || 0)));
+    }
+    const hex = String(value || "#009bde").replace(/^#/, "");
+    if (/^[0-9a-fA-F]{6}$/.test(hex)) {
+        return [
+            parseInt(hex.slice(0, 2), 16),
+            parseInt(hex.slice(2, 4), 16),
+            parseInt(hex.slice(4, 6), 16),
+        ];
+    }
+    return [0, 155, 222];
 }
 
 function GetChannelRGB() {
-    const channel = device.channel(CHANNEL_NAME);
-    const ledCount = channel.LedCount();
-
+    const ledCount = Number(controller.ledCount) || 14;
     if (LightingMode === "Forced") {
-        return device.createColorArray(forcedColor, ledCount, "Inline");
+        const color = ParseForcedColor(forcedColor);
+        return Array.from({ length: ledCount }, () => color).flat();
     }
 
-    if (channel.shouldPulseColors()) {
-        return device.createColorArray(
-            device.getChannelPulseColor(CHANNEL_NAME),
-            channel.LedLimit(),
-            "Inline"
-        );
+    // SignalRGB's device.color(x, y) reads the rendered canvas pixel at
+    // the LED's mapped position. The channel.getColors() API is for
+    // configured component channels and can return no data when none are set.
+    const colors = [];
+    for (let index = 0; index < ledCount; index++) {
+        const color = device.color(index, 0);
+        if (!Array.isArray(color) || color.length < 3) return undefined;
+        colors.push(Number(color[0]) || 0, Number(color[1]) || 0, Number(color[2]) || 0);
     }
-
-    return channel.getColors("Inline");
+    return colors;
 }
 
 export function Initialize() {
@@ -103,25 +118,22 @@ export function Initialize() {
 
     device.setName(`Govee BLE - ${controller.name || controller.sku}`);
     device.setImageFromUrl(DEVICE_IMAGE);
-    ConfigureChannels();
-
     if (socket !== undefined) {
         try { socket.close(); } catch (_) { /* Ignore stale socket during reinit. */ }
     }
 
     socket = udp.createSocket();
-    socket.on("connected", () => {
+    socket.on("error", (err) => {
+        device.log(`Bridge socket error: ${err}`);
+    });
+    socket.on("listening", () => {
+        device.log("UDP listener bound for the local Govee BLE bridge.");
+    });
+    socket.on("connection", () => {
         socketConnected = true;
         device.log(`UDP socket connected to ${BRIDGE_HOST}:${BRIDGE_PORT}.`);
     });
-    socket.on("disconnected", () => {
-        socketConnected = false;
-        device.log("Disconnected from local Govee BLE bridge.");
-    });
-    socket.on("error", (err) => {
-        socketConnected = false;
-        device.log(`Bridge socket error: ${err}`);
-    });
+    socket.bind(0);
     socket.connect(BRIDGE_HOST, BRIDGE_PORT);
 
     device.log(`Ready to stream ${controller.ledCount} segments to ${controller.deviceKey}.`);
@@ -144,7 +156,7 @@ export function Render() {
     if (!Array.isArray(colors) || colors.length !== Number(controller.ledCount) * 3) {
         if (!loggedColorShapeWarning) {
             loggedColorShapeWarning = true;
-            const actualLength = Array.isArray(colors) ? colors.length : "not an array";
+            const actualLength = Array.isArray(colors) ? colors.length : "device.color() did not return RGB data";
             device.log(`RGB data shape mismatch for ${controller.deviceKey}: expected ${Number(controller.ledCount) * 3} values, got ${actualLength}.`);
         }
         return;
