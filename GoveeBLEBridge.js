@@ -43,13 +43,38 @@ export function Name() { return "Govee BLE Bridge"; }
 export function Version() { return "0.1.0"; }
 export function Type() { return "network"; }
 export function Publisher() { return "Stuffy"; }
-export function Size() {
-    const count = Number(controller?.ledCount) || 14;
-    return [count, 1];
+// LED geometry is defined in the same order as the Govee segment indices.
+// H60A1: segments 1-13 form the outer ring; segment 14 is the center panel.
+// H617A: eight segments form a straight horizontal strip.
+const CEILING_RING_POSITIONS = [
+    [5, 1], [7, 1], [9, 3], [9, 4], [9, 7], [8, 8], [6, 9],
+    [4, 9], [2, 8], [1, 7], [1, 4], [1, 3], [3, 1],
+    [5, 5], // Segment 14: center panel
+];
+const DESK_STRIP_POSITIONS = Array.from({ length: 8 }, (_, index) => [index, 0]);
+
+function GetLedPositions() {
+    return controller?.deviceKey === "desk"
+        ? DESK_STRIP_POSITIONS
+        : CEILING_RING_POSITIONS;
 }
+
+export function Size() {
+    return controller?.deviceKey === "desk" ? [8, 1] : [11, 11];
+}
+
+export function LedNames() {
+    if (controller?.deviceKey === "desk") {
+        return Array.from({ length: 8 }, (_, index) => `Segment ${index + 1}`);
+    }
+    return [
+        ...Array.from({ length: 13 }, (_, index) => `Ring Segment ${index + 1}`),
+        "Center Panel",
+    ];
+}
+
 export function LedPositions() {
-    const count = Number(controller?.ledCount) || 14;
-    return Array.from({ length: count }, (_, index) => [index, 0]);
+    return GetLedPositions();
 }
 export function SubdeviceController() { return true; }
 export function ImageUrl() { return DEVICE_IMAGE; }
@@ -101,8 +126,10 @@ function GetChannelRGB() {
     // the LED's mapped position. The channel.getColors() API is for
     // configured component channels and can return no data when none are set.
     const colors = [];
-    for (let index = 0; index < ledCount; index++) {
-        const color = device.color(index, 0);
+    const positions = GetLedPositions();
+    if (positions.length !== ledCount) return undefined;
+    for (const [x, y] of positions) {
+        const color = device.color(x, y);
         if (!Array.isArray(color) || color.length < 3) return undefined;
         colors.push(Number(color[0]) || 0, Number(color[1]) || 0, Number(color[2]) || 0);
     }
