@@ -1,29 +1,52 @@
 import udp from "@SignalRGB/udp";
 
-/* global controller, service, discovery, LightingMode, forcedColor */
+/* global controller, device, discovery, service, LightingMode, forcedColor */
 
 const BRIDGE_HOST = "127.0.0.1";
 const BRIDGE_PORT = 45871;
 const FRAME_INTERVAL_MS = 100;
 const CHANNEL_NAME = "Channel 1";
 const DEVICE_IMAGE = "https://assets.signalrgb.com/brands/products/govee_ble/icon@2x.png";
+const CACHE_GROUP = "goveeBleBridge";
+const CACHE_KEY = "devices";
 
 const DEVICE_DEFINITIONS = [
-    { id: "govee-ble-office", deviceKey: "office", name: "Office Ceiling Light", sku: "H60A1", ledCount: 14 },
-    { id: "govee-ble-bedside", deviceKey: "bedside", name: "Bedside Ceiling Light", sku: "H60A1", ledCount: 14 },
-    { id: "govee-ble-desk", deviceKey: "desk", name: "Under-desk RGBIC Strip", sku: "H617A", ledCount: 8 },
+    {
+        id: "govee-ble-office",
+        deviceKey: "office",
+        name: "Office Ceiling Light",
+        sku: "H60A1",
+        ledCount: 14
+    },
+    {
+        id: "govee-ble-bedside",
+        deviceKey: "bedside",
+        name: "Bedside Ceiling Light",
+        sku: "H60A1",
+        ledCount: 14
+    },
+    {
+        id: "govee-ble-desk",
+        deviceKey: "desk",
+        name: "Under-desk RGBIC Strip",
+        sku: "H617A",
+        ledCount: 8
+    }
 ];
 
 let socket;
+let socketConnected = false;
 let lastFrameAt = 0;
-let lastDiagnosticAt = 0;
+let lastWarningAt = 0;
+let lastWarningText = "";
+let framesSent = 0;
 let firstFrameLogged = false;
-let receivedColorCount = 0;
 
+// These are the standard exports SignalRGB expects from a network add-on.
+// DiscoveryService below creates the three virtual controllers.
 export function Name() { return "Govee BLE Bridge"; }
-export function Version() { return "0.2.0"; }
+export function Version() { return "1.0.0"; }
 export function Type() { return "network"; }
-export function DeviceType() { return "lightingcontroller"; }
 export function Publisher() { return "Stuffy"; }
 export function Size() { return [22, 1]; }
 export function SubdeviceController() { return true; }
@@ -32,141 +55,320 @@ export function ImageUrl() { return DEVICE_IMAGE; }
 export function ControllableParameters() {
     return [
         {
-            property: "LightingMode", group: "lighting", label: "Lighting Mode",
-            description: "Canvas follows SignalRGB effects; Forced uses one fixed color.",
-            type: "combobox", values: ["Canvas", "Forced"], default: "Canvas",
+            property: "LightingMode",
+            group: "lighting",
+            label: "Lighting Mode",
+            description: "Canvas follows SignalRGB effects. Forced sends one chosen color to every segment.",
+            type: "combobox",
+            values: ["Canvas", "Forced"],
+            default: "Canvas"
         },
         {
-            property: "forcedColor", group: "lighting", label: "Forced Color",
-            type: "color", default: "#009bde",
-        },
+            property: "forcedColor",
+            group: "lighting",
+            label: "Forced Color",
+            type: "color",
+            default: "#009bde"
+        }
     ];
 }
 
-function LedCountForController() {
-    const key = (typeof controller !== "undefined" && controller) ? controller.deviceKey : undefined;
-    const definition = DEVICE_DEFINITIONS.find((item) => item.deviceKey === key);
-    return definition ? definition.ledCount : 14;
-}
-
-function ConfigureChannels() {
-    const ledCount = LedCountForController();
-    device.addChannel(CHANNEL_NAME, ledCount);
-    device.channel(CHANNEL_NAME).SetLedLimit(ledCount);
-    device.SetLedLimit(ledCount);
-    device.log(`Configured component channel '${CHANNEL_NAME}' for ${ledCount} LEDs.`);
-}
-
-function NormalizeColorArray(raw, expectedLedCount) {
-    if (!Array.isArray(raw)) return undefined;
-    const output = [];
-    for (let i = 0; i < expectedLedCount; i++) {
-        const offset = i * 3;
-        if (offset + 2 >= raw.length) return undefined;
-        output.push(
-            Math.max(0, Math.min(255, Math.round(Number(raw[offset]) || 0))),
-            Math.max(0, Math.min(255, Math.round(Number(raw[offset + 1]) || 0))),
-            Math.max(0, Math.min(255, Math.round(Number(raw[offset + 2]) || 0))),
-        );
+function GetDefinition(deviceKey) {
+    for (let i = 0; i < DEVICE_DEFINITIONS.length; i++) {
+        if (DEVICE_DEFINITIONS[i].deviceKey === deviceKey) {
+            return DEVICE_DEFINITIONS[i];
+        }
     }
-    return output;
+    return undefined;
 }
 
-function GetRGBFrame() {
-    const channel = device.channel(CHANNEL_NAME);
-    const ledCount = channel ? channel.LedCount() : 0;
-    
-    if (LightingMode === "Forced") {
-    if (LightingMode === "Forced") {
-        return device.createColorArray(forcedColor, ledCount, "Inline");
+function LogWarning(message) {
+    const now = Date.now();
+    if (message !== lastWarningText || now - lastWarningAt >= 10000) {
+        lastWarningText = message;
+        lastWarningAt = now;
+        device.log(message);
+    }
+}
+
+function ConfigureChannel(expectedLedCount) {
+    let channel = device.channel(CHANNEL_NAME);
+
+    // Channels can survive an add-on hot reload. Reuse an existing channel so its
+    // component layout is not unnecessarily discarded.
+    if (channel === null || channel === undefined) {
+        device.addChannel(CHANNEL_NAME, expectedLedCount);
+        channel = device.channel(CHANNEL_NAME);
     }
 
-    // Component mode: SignalRGB maps the user's selected fan/strip components
-    // onto this channel. getColors() returns the resulting RGB values in chain order.
-    if (!channel || typeof channel.getColors !== "function") {
-        device.log("Component channel is unavailable; no RGB frame can be sent yet.");
+    if (channel === null || channel === undefined) {
+        throw new Error("SignalRGB did not create the '" + CHANNEL_NAME + "' component channel.");
+    }
+
+    channel.SetLedLimit(expectedLedCount);
+    device.SetLedLimit(expectedLedCount);
+    device.log("Component channel ready. Hardware segment count: " + expectedLedCount + ".");
+}
+
+function NormalizeRGBArray(raw, expectedValueCount) {
+    if (!Array.isArray(raw) || raw.length !== expectedValueCount) {
         return undefined;
     }
-    const raw = channel.getColors("Inline");
-    device.log("Component constructor: " + raw.constructor.name);
-    device.log("Component keys: " + Object.keys(raw).join(", "));
-    device.log("Component JSON: " + JSON.stringify(raw));
-    
-    return NormalizeColorArray(raw, ledCount);
+
+    const normalized = [];
+    for (let i = 0; i < raw.length; i++) {
+        const value = Number(raw[i]);
+        if (!Number.isFinite(value)) {
+            return undefined;
+        }
+        normalized.push(Math.max(0, Math.min(255, Math.round(value))));
+    }
+    return normalized;
 }
 
-export function Initialize() {
-    lastFrameAt = 0;
-    lastDiagnosticAt = 0;
-    firstFrameLogged = false;
-    receivedColorCount = 0;
-
-    const ledCount = LedCountForController();
-    device.setName(`Govee BLE - ${controller.name || controller.sku || controller.deviceKey}`);
-    device.setImageFromUrl(DEVICE_IMAGE);
-    ConfigureChannels();
-
-    if (socket !== undefined) {
-        try { socket.close(); } catch (_) { /* stale socket */ }
-    }
-
-    socket = udp.createSocket();
-    socket.on("error", (err) => device.log(`Bridge UDP error: ${err}`));
-    socket.on("connection", () => device.log(`UDP socket connected to ${BRIDGE_HOST}:${BRIDGE_PORT}.`));
-    socket.on("listening", () => device.log("UDP socket listener bound."));
-    socket.bind(0);
-    socket.connect(BRIDGE_HOST, BRIDGE_PORT);
-    device.log(`Ready to stream ${ledCount} LEDs for ${controller.deviceKey}.`);
-}
-
-export function Render() {
-    if (socket === undefined) return;
-    const now = Date.now();
-    if (now - lastDiagnosticAt >= 10000) {
-        lastDiagnosticAt = now;
-        device.log(`Render active for ${controller.deviceKey}; reading ${LedCountForController()} component LEDs.`);
-    }
-    if (now - lastFrameAt < FRAME_INTERVAL_MS) return;
-    lastFrameAt = now;
-
-    const colors = GetRGBFrame();
+function GetRGBFrame(expectedHardwareLedCount) {
     const channel = device.channel(CHANNEL_NAME);
-    const expectedValues = channel ? channel.LedCount() * 3 : 0;
-    if (!Array.isArray(colors) || colors.length !== expectedValues) {
-        device.log(`No valid component RGB frame for ${controller.deviceKey}; expected ${expectedValues} values.`);
-        return;
+    if (channel === null || channel === undefined) {
+        LogWarning("Component channel '" + CHANNEL_NAME + "' is missing.");
+        return undefined;
     }
 
-    const payload = JSON.stringify({ device: controller.deviceKey, colors });
-    try {
-        socket.send(payload);
-        receivedColorCount++;
-        if (!firstFrameLogged) {
-            firstFrameLogged = true;
-            device.log(`First component RGB frame sent for ${controller.deviceKey} (${colors.length / 3} LEDs).`);
-        }
-        if (receivedColorCount % 100 === 0) {
-            device.log(`Sent ${receivedColorCount} RGB frames for ${controller.deviceKey}.`);
-        }
-    } catch (err) {
-        device.log(`UDP send failed for ${controller.deviceKey}: ${err}`);
+    const configuredLedCount = channel.LedCount();
+
+    // SignalRGB pulses an unconfigured channel while the user is choosing
+    // components. Use the physical segment count for that setup preview.
+    if (LightingMode !== "Forced" &&
+        typeof channel.shouldPulseColors === "function" &&
+        channel.shouldPulseColors()) {
+        const pulseColor = device.getChannelPulseColor(CHANNEL_NAME);
+        const pulse = device.createColorArray(pulseColor, expectedHardwareLedCount, "Inline");
+        return {
+            colors: NormalizeRGBArray(pulse, expectedHardwareLedCount * 3),
+            ledCount: expectedHardwareLedCount,
+            isPulse: true
+        };
     }
+
+    if (configuredLedCount <= 0) {
+        LogWarning("No components are configured on channel '" + CHANNEL_NAME + "'. Add the light's segments in SignalRGB's component editor.");
+        return undefined;
+    }
+
+    let rawColors;
+    if (LightingMode === "Forced") {
+        rawColors = device.createColorArray(forcedColor, configuredLedCount, "Inline");
+    } else {
+        rawColors = channel.getColors("Inline", "RGB");
+    }
+
+    // Validate against SignalRGB's actual component count first. This is deliberately
+    // separate from the next physical-device check; neither count is guessed.
+    const expectedValueCount = configuredLedCount * 3;
+    if (!Array.isArray(rawColors) || rawColors.length !== expectedValueCount) {
+        const actualLength = Array.isArray(rawColors) ? rawColors.length : "not an array";
+        LogWarning(
+            "SignalRGB component data mismatch: channel.LedCount()=" + configuredLedCount +
+            ", getColors() length=" + actualLength + ", expected=" + expectedValueCount + "."
+        );
+        return undefined;
+    }
+
+    if (configuredLedCount !== expectedHardwareLedCount) {
+        LogWarning(
+            "Component layout has " + configuredLedCount + " LEDs, but " + controller.sku +
+            " has " + expectedHardwareLedCount + " controllable segments. Set the '" +
+            CHANNEL_NAME + "' component channel to exactly " + expectedHardwareLedCount + " LEDs."
+        );
+        return undefined;
+    }
+
+    return {
+        colors: NormalizeRGBArray(rawColors, expectedValueCount),
+        ledCount: configuredLedCount,
+        isPulse: false
+    };
 }
 
-export function Shutdown() {
+function CloseSocket() {
+    socketConnected = false;
     if (socket !== undefined) {
-        try { socket.close(); } catch (_) { /* already closed */ }
+        try {
+            if (typeof socket.disconnect === "function") {
+                socket.disconnect();
+            }
+        } catch (_) {
+            // The socket may already be disconnected.
+        }
+        try {
+            socket.close();
+        } catch (_) {
+            // The socket may already be closed.
+        }
         socket = undefined;
     }
 }
 
-// ---------------- SignalRGB network-service discovery ----------------
+export function Initialize() {
+    const definition = GetDefinition(controller.deviceKey);
+    if (definition === undefined) {
+        throw new Error("Unknown Govee BLE device key: " + controller.deviceKey);
+    }
+
+    lastFrameAt = 0;
+    lastWarningAt = 0;
+    lastWarningText = "";
+    framesSent = 0;
+    firstFrameLogged = false;
+
+    device.setName("Govee BLE - " + definition.name);
+    device.setImageFromUrl(DEVICE_IMAGE);
+    ConfigureChannel(definition.ledCount);
+
+    CloseSocket();
+    socket = udp.createSocket();
+    if (socket === undefined || socket === null) {
+        throw new Error("SignalRGB could not create a UDP socket.");
+    }
+
+    socket.on("connection", function () {
+        socketConnected = true;
+        device.log("UDP connected to local BLE bridge at " + BRIDGE_HOST + ":" + BRIDGE_PORT + ".");
+    });
+    socket.on("error", function (error) {
+        socketConnected = false;
+        device.log("Local BLE bridge UDP error: " + error);
+    });
+    socket.on("listening", function () {
+        device.log("Local BLE bridge UDP socket bound.");
+    });
+
+    // Match SignalRGB's built-in Govee add-on socket setup: bind an ephemeral local
+    // port, then connect the UDP socket to the local companion process.
+    socket.bind(0);
+    socket.connect(BRIDGE_HOST, BRIDGE_PORT);
+
+    device.log("Initialized " + definition.name + " (" + definition.ledCount + " physical segments).");
+}
+
+export function Render() {
+    if (socket === undefined || !socketConnected) {
+        return;
+    }
+
+    const now = Date.now();
+    if (now - lastFrameAt < FRAME_INTERVAL_MS) {
+        return;
+    }
+    lastFrameAt = now;
+
+    const definition = GetDefinition(controller.deviceKey);
+    if (definition === undefined) {
+        return;
+    }
+
+    const frame = GetRGBFrame(definition.ledCount);
+    if (frame === undefined || !Array.isArray(frame.colors)) {
+        return;
+    }
+
+    if (frame.colors.length !== definition.ledCount * 3) {
+        LogWarning(
+            "Refusing to send malformed RGB frame: got " + frame.colors.length +
+            " values; hardware requires " + (definition.ledCount * 3) + "."
+        );
+        return;
+    }
+
+    const payload = JSON.stringify({
+        device: definition.deviceKey,
+        colors: frame.colors
+    });
+
+    try {
+        const result = socket.send(payload);
+        if (result === -1) {
+            LogWarning("UDP send returned -1 for " + definition.deviceKey + ".");
+            return;
+        }
+        framesSent++;
+        if (!firstFrameLogged) {
+            firstFrameLogged = true;
+            device.log("First RGB frame sent for " + definition.deviceKey + " (" + frame.ledCount + " segments).");
+        }
+        if (framesSent % 300 === 0) {
+            device.log("Sent " + framesSent + " RGB frames for " + definition.deviceKey + ".");
+        }
+    } catch (error) {
+        LogWarning("UDP send failed for " + definition.deviceKey + ": " + error);
+    }
+}
+
+export function Shutdown() {
+    CloseSocket();
+    // Do not switch the Govee devices off; leave their last received color in place.
+}
+
+// --------------------------- Third-party service / controller discovery ---------------------------
+
+class BridgeCache {
+    constructor() {
+        this.items = new Map();
+        this.load();
+    }
+
+    load() {
+        const stored = service.getSetting(CACHE_GROUP, CACHE_KEY);
+        if (stored === undefined || stored === null || stored === "") {
+            return;
+        }
+
+        try {
+            const parsed = JSON.parse(stored);
+            if (Array.isArray(parsed)) {
+                this.items = new Map(parsed);
+            }
+        } catch (error) {
+            service.log("Could not load Govee BLE controller cache: " + error);
+        }
+    }
+
+    save() {
+        service.saveSetting(CACHE_GROUP, CACHE_KEY, JSON.stringify(Array.from(this.items.entries())));
+    }
+
+    Add(key, value) {
+        this.items.set(key, value);
+        this.save();
+    }
+
+    Remove(key) {
+        this.items.delete(key);
+        this.save();
+    }
+
+    Get(key) {
+        return this.items.get(key);
+    }
+
+    PurgeCache() {
+        this.items.clear();
+        service.removeSetting(CACHE_GROUP, CACHE_KEY);
+    }
+}
 
 class BridgeController {
     constructor(value) {
         this.id = value.id;
         const cached = discovery.cache.Get(value.id);
-        this.paired = (value.paired !== undefined && value.paired !== null) ? value.paired : ((cached && cached.paired !== undefined) ? cached.paired : false);
+
+        if (value.paired !== undefined && value.paired !== null) {
+            this.paired = value.paired;
+        } else if (cached && cached.paired !== undefined && cached.paired !== null) {
+            this.paired = cached.paired;
+        } else {
+            this.paired = false;
+        }
+
         this.deviceKey = value.deviceKey;
         this.name = value.name;
         this.sku = value.sku;
@@ -178,11 +380,13 @@ class BridgeController {
     }
 
     updateWithValue(value) {
-        this.paired = (value.paired !== undefined && value.paired !== null) ? value.paired : this.paired;
-        this.deviceKey = value.deviceKey;
-        this.name = value.name;
-        this.sku = value.sku;
-        this.ledCount = value.ledCount;
+        if (value.paired !== undefined && value.paired !== null) {
+            this.paired = value.paired;
+        }
+        this.deviceKey = value.deviceKey || this.deviceKey;
+        this.name = value.name || this.name;
+        this.sku = value.sku || this.sku;
+        this.ledCount = value.ledCount || this.ledCount;
         this.ip = BRIDGE_HOST;
         this.deviceImage = DEVICE_IMAGE;
         service.updateController(this);
@@ -200,84 +404,112 @@ class BridgeController {
 
     cacheControllerInfo(value) {
         discovery.cache.Add(value.id, {
-            id: value.id, paired: value.paired, deviceKey: value.deviceKey,
-            name: value.name, sku: value.sku, ledCount: value.ledCount,
-            ip: BRIDGE_HOST, deviceImage: DEVICE_IMAGE, initialized: value.initialized,
+            id: value.id,
+            paired: value.paired,
+            deviceKey: value.deviceKey,
+            name: value.name,
+            sku: value.sku,
+            ledCount: value.ledCount,
+            ip: BRIDGE_HOST,
+            deviceImage: DEVICE_IMAGE,
+            initialized: value.initialized
         });
     }
-}
-
-class BridgeCache {
-    constructor() { this.items = new Map(); this.Populate(); }
-    Populate() {
-        const stored = service.getSetting("goveeBleBridge", "devices");
-        if (stored === undefined) return;
-        try { for (const [key, value] of JSON.parse(stored)) this.items.set(key, value); }
-        catch (err) { service.log(`Could not read bridge device cache: ${err}`); }
-    }
-    Add(key, value) {
-        this.items.set(key, value);
-        service.saveSetting("goveeBleBridge", "devices", JSON.stringify(Array.from(this.items.entries())));
-    }
-    Remove(key) {
-        this.items.delete(key);
-        service.saveSetting("goveeBleBridge", "devices", JSON.stringify(Array.from(this.items.entries())));
-    }
-    Get(key) { return this.items.get(key); }
-    PurgeCache() { this.items.clear(); service.removeSetting("goveeBleBridge", "devices"); }
 }
 
 export function DiscoveryService() {
     this.IconUrl = DEVICE_IMAGE;
     this.firstRun = true;
     this.cache = new BridgeCache();
-    this.Initialize = function () { service.log("Preparing the three local Govee BLE component controllers..."); };
+
+    this.Initialize = function () {
+        service.log("Preparing the three local Govee BLE virtual controllers.");
+    };
+
     this.LoadCachedDevices = function () {
-        for (const definition of DEVICE_DEFINITIONS) {
+        for (let i = 0; i < DEVICE_DEFINITIONS.length; i++) {
+            const definition = DEVICE_DEFINITIONS[i];
             const cached = this.cache.Get(definition.id);
-            var deviceValue = Object.assign({}, definition);
-            deviceValue.paired = (cached && cached.paired !== undefined && cached.paired !== null) ? cached.paired : false;
-            this.CreateControllerDevice(deviceValue);
+            const value = {
+                id: definition.id,
+                deviceKey: definition.deviceKey,
+                name: definition.name,
+                sku: definition.sku,
+                ledCount: definition.ledCount,
+                paired: cached && cached.paired !== undefined && cached.paired !== null
+                    ? cached.paired
+                    : false
+            };
+            this.CreateControllerDevice(value);
         }
     };
+
     this.CreateControllerDevice = function (value) {
         const existing = service.getController(value.id);
-        if (existing === undefined) service.addController(new BridgeController(value));
-        else existing.updateWithValue(value);
+        if (existing === undefined) {
+            service.addController(new BridgeController(value));
+        } else {
+            existing.updateWithValue(value);
+        }
     };
+
     this.Update = function () {
-        if (this.firstRun) { this.LoadCachedDevices(); this.firstRun = false; }
-        for (const entry of service.controllers) entry.obj.update();
+        if (this.firstRun) {
+            this.LoadCachedDevices();
+            this.firstRun = false;
+        }
+
+        for (const entry of service.controllers) {
+            if (entry.obj && typeof entry.obj.update === "function") {
+                entry.obj.update();
+            }
+        }
     };
+
     this.link = function (controllerObject) {
         const target = service.getController(controllerObject.id);
-        if (!target) return;
+        if (target === undefined) {
+            return;
+        }
         target.paired = true;
         target.updateWithValue(target);
         service.announceController(target);
         target.cacheControllerInfo(target);
-        service.log(`Linked ${target.name} (${target.deviceKey}).`);
+        service.log("Linked " + target.name + " (" + target.deviceKey + ").");
     };
+
     this.unlink = function (controllerObject) {
         const target = service.getController(controllerObject.id);
-        if (!target) return;
+        if (target === undefined) {
+            return;
+        }
         target.paired = false;
         target.updateWithValue(target);
         service.suppressController(target);
         target.cacheControllerInfo(target);
-        service.log(`Unlinked ${target.name} (${target.deviceKey}).`);
+        service.log("Unlinked " + target.name + " (" + target.deviceKey + ").");
     };
-    this.remove = function (controllerObject = false) {
+
+    this.remove = function (controllerObject) {
         if (controllerObject) {
             const target = service.getController(controllerObject.id);
-            if (target) { this.cache.Remove(target.id); service.suppressController(target); service.removeController(target); }
+            if (target !== undefined) {
+                this.cache.Remove(target.id);
+                service.suppressController(target);
+                service.removeController(target);
+            }
             return;
         }
+
         this.cache.PurgeCache();
-        for (const definition of DEVICE_DEFINITIONS) {
-            const target = service.getController(definition.id);
-            if (target) { service.suppressController(target); service.removeController(target); }
+        for (let i = 0; i < DEVICE_DEFINITIONS.length; i++) {
+            const target = service.getController(DEVICE_DEFINITIONS[i].id);
+            if (target !== undefined) {
+                service.suppressController(target);
+                service.removeController(target);
+            }
         }
     };
-    this.Shutdown = function () {};
+
+    this.Shutdown = function () { };
 }

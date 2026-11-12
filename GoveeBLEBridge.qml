@@ -22,7 +22,7 @@ Item {
 
         Text {
             Layout.fillWidth: true
-            text: "Link each virtual controller to add it to SignalRGB. The Python bridge must be running separately."
+            text: "Link a virtual controller to make it available in SignalRGB. The Python BLE bridge must be running separately."
             color: theme.secondarytextcolor
             font.family: theme.secondaryfont
             font.pixelSize: 13
@@ -63,7 +63,7 @@ Item {
 
                         Text {
                             Layout.fillWidth: true
-                            text: `${target.sku} · ${target.ledCount} segments · ${target.deviceKey}`
+                            text: target.sku + "  |  " + target.ledCount + " segments  |  " + target.deviceKey
                             color: theme.secondarytextcolor
                             font.family: theme.secondaryfont
                             font.pixelSize: 12
@@ -88,7 +88,7 @@ Item {
 
         Text {
             Layout.fillWidth: true
-            text: "Bridge address: 127.0.0.1:45871 (UDP). Devices must already be powered on."
+            text: "Local bridge: 127.0.0.1:45871 UDP. Keep all Govee lights powered on."
             color: theme.secondarytextcolor
             font.family: theme.secondaryfont
             font.pixelSize: 11
