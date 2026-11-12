@@ -14,6 +14,7 @@ The companion process owns the BLE connections. SignalRGB sends flattened RGB fr
 
 - `GoveeBLEBridge.js` — SignalRGB network add-on, virtual controller discovery, component channel, and UDP output.
 - `GoveeBLEBridge.qml` — controller link/unlink UI.
+- `Components/` — editable 14-LED H60A1 and 8-LED H617A SignalRGB component definitions.
 - `govee_signalrgb_bridge.py` — UDP receiver and live BLE RGB streaming.
 - `govee_persistent_ble.py` — BLE connection, H60A1 session negotiation, H617A keepalive, and protocol framing.
 - `start_govee_ble_bridge.bat` — installs Python dependencies if missing and starts the companion process.
@@ -26,16 +27,24 @@ The companion process owns the BLE connections. SignalRGB sends flattened RGB fr
 3. Accept the installation prompt and fully restart SignalRGB from its system-tray menu.
 4. Open the add-on under **Third Party Services** (the label can vary by SignalRGB version) and link the three virtual controllers.
 
-The add-on uses the same `DiscoveryService` / virtual-controller pattern as SignalRGB's built-in Govee network add-on. The three controllers are created locally; they do not require Govee Wi-Fi/LAN discovery.
+The add-on uses a local `DiscoveryService` and virtual controllers. `Type()` remains `"network"` for the local UDP transport; `DeviceType()` identifies the virtual devices as lighting controllers.
 
 ## Configure the component layout
 
-Each controller exposes one component channel named **Channel 1**. Keep the user-configured channel count equal to the number of physical Govee segments:
+Copy the two JSON files from this repository's `Components` folder into:
 
-- Each H60A1: 14 LEDs (13 rear/ring segments plus the front panel).
-- H617A: 8 LEDs.
+`%USERPROFILE%\Documents\WhirlwindFX\Components`
 
-The add-on validates the RGB array against `channel.LedCount()` first, then separately checks that the configured count matches the physical device's segment count. It will not truncate, pad, or silently mis-map a mismatched layout. A mismatch is reported in the SignalRGB device log.
+Restart SignalRGB. On each virtual controller, open **Channel 1** in the component picker. Remove the existing placeholder or previous component first, then select the matching component:
+
+- Office Ceiling Light and Bedside Ceiling Light: **Govee H60A1 - 13 Segment Ring + Center** (14 LEDs).
+- Under-desk RGBIC Strip: **Govee H617A - 8 Segment Strip** (8 LEDs).
+
+The current log's `channel.LedCount()=7` means the H60A1 channel still has a seven-LED component selected. The BLE protocol needs fourteen separate segment colors, so that seven-LED assignment cannot be sent as-is.
+
+You can then arrange the component in SignalRGB's component editor. The LED coordinates are defaults in the component definition; the add-on itself does not hardcode the ceiling light's geometry.
+
+The BLE protocol addresses exactly 14 H60A1 segments and 8 H617A segments. The add-on checks `channel.LedCount()` before reading colors and refuses to send if the selected component count differs. It reads colors with SignalRGB's built-in Govee call `channel.getColors("Inline")` and validates the returned flat RGB array against the configured count. It will not pad, truncate, or silently remap a component layout.
 
 ## Run the BLE companion
 

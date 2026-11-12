@@ -45,8 +45,9 @@ let firstFrameLogged = false;
 // These are the standard exports SignalRGB expects from a network add-on.
 // DiscoveryService below creates the three virtual controllers.
 export function Name() { return "Govee BLE Bridge"; }
-export function Version() { return "1.0.0"; }
+export function Version() { return "1.0.1"; }
 export function Type() { return "network"; }
+export function DeviceType() { return "lightingcontroller"; }
 export function Publisher() { return "Stuffy"; }
 export function Size() { return [22, 1]; }
 export function SubdeviceController() { return true; }
@@ -110,13 +111,30 @@ function ConfigureChannel(expectedLedCount) {
     device.log("Component channel ready. Hardware segment count: " + expectedLedCount + ".");
 }
 
+function GetSequenceLength(value) {
+    if (value === null || value === undefined) {
+        return -1;
+    }
+
+    // SignalRGB can expose component colors as a host-provided array-like value.
+    // It has numeric indexes and a length, but Array.isArray() is not reliable
+    // across the host's JS/QML boundary. Validate the actual sequence contract.
+    const length = value.length;
+    if (typeof length !== "number" || !Number.isFinite(length) ||
+        length < 0 || Math.floor(length) !== length) {
+        return -1;
+    }
+    return length;
+}
+
 function NormalizeRGBArray(raw, expectedValueCount) {
-    if (!Array.isArray(raw) || raw.length !== expectedValueCount) {
+    const rawLength = GetSequenceLength(raw);
+    if (rawLength !== expectedValueCount) {
         return undefined;
     }
 
     const normalized = [];
-    for (let i = 0; i < raw.length; i++) {
+    for (let i = 0; i < rawLength; i++) {
         const value = Number(raw[i]);
         if (!Number.isFinite(value)) {
             return undefined;
@@ -150,7 +168,21 @@ function GetRGBFrame(expectedHardwareLedCount) {
     }
 
     if (configuredLedCount <= 0) {
-        LogWarning("No components are configured on channel '" + CHANNEL_NAME + "'. Add the light's segments in SignalRGB's component editor.");
+        LogWarning("No components are configured on channel '" + CHANNEL_NAME + "'. Add the matching Govee component in SignalRGB's component editor.");
+        return undefined;
+    }
+
+    // The BLE protocol addresses a fixed number of physical segments. Refuse a
+    // different SignalRGB component count before reading or sending any color data.
+    if (configuredLedCount !== expectedHardwareLedCount) {
+        const suggestedComponent = controller.sku === "H60A1"
+            ? "Govee H60A1 - 13 Segment Ring + Center"
+            : "Govee H617A - 8 Segment Strip";
+        LogWarning(
+            "Component layout mismatch: Channel 1 currently has " + configuredLedCount +
+            " LEDs, but " + controller.sku + " requires " + expectedHardwareLedCount +
+            ". Select '" + suggestedComponent + "' in the component picker."
+        );
         return undefined;
     }
 
@@ -158,32 +190,32 @@ function GetRGBFrame(expectedHardwareLedCount) {
     if (LightingMode === "Forced") {
         rawColors = device.createColorArray(forcedColor, configuredLedCount, "Inline");
     } else {
-        rawColors = channel.getColors("Inline", "RGB");
+        // Match SignalRGB's own Govee add-on exactly. The first argument selects
+        // a flat RGB array; omitting the optional ColorOrder argument avoids
+        // runtime-version differences in the component-channel binding.
+        rawColors = channel.getColors("Inline");
     }
 
-    // Validate against SignalRGB's actual component count first. This is deliberately
-    // separate from the next physical-device check; neither count is guessed.
     const expectedValueCount = configuredLedCount * 3;
-    if (!Array.isArray(rawColors) || rawColors.length !== expectedValueCount) {
-        const actualLength = Array.isArray(rawColors) ? rawColors.length : "not an array";
+    const rawLength = GetSequenceLength(rawColors);
+    if (rawLength !== expectedValueCount) {
+        const actualLength = rawLength >= 0 ? rawLength : "unavailable/non-sequence";
         LogWarning(
             "SignalRGB component data mismatch: channel.LedCount()=" + configuredLedCount +
-            ", getColors() length=" + actualLength + ", expected=" + expectedValueCount + "."
+            ", getColors(\"Inline\") length=" + actualLength +
+            ", expected=" + expectedValueCount + "."
         );
         return undefined;
     }
 
-    if (configuredLedCount !== expectedHardwareLedCount) {
-        LogWarning(
-            "Component layout has " + configuredLedCount + " LEDs, but " + controller.sku +
-            " has " + expectedHardwareLedCount + " controllable segments. Set the '" +
-            CHANNEL_NAME + "' component channel to exactly " + expectedHardwareLedCount + " LEDs."
-        );
+    const normalizedColors = NormalizeRGBArray(rawColors, expectedValueCount);
+    if (normalizedColors === undefined) {
+        LogWarning("SignalRGB returned non-numeric RGB values for channel '" + CHANNEL_NAME + "'.");
         return undefined;
     }
 
     return {
-        colors: NormalizeRGBArray(rawColors, expectedValueCount),
+        colors: normalizedColors,
         ledCount: configuredLedCount,
         isPulse: false
     };
